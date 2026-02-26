@@ -8,9 +8,9 @@
 </p>
 
 <p align="center">
-  <b>Control Figma directly from your terminal.</b><br>
-  Full read/write access to Figma Desktop via Chrome DevTools Protocol.<br>
-  No API key, no plugins, no MCP server setup.
+  <b>Control Figma Desktop with Claude Code.</b><br>
+  Full read/write access. No API key required.<br>
+  Just talk to Claude about your designs.
 </p>
 
 ```
