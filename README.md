@@ -68,7 +68,7 @@ No explaining. No teaching. Just ask.
 
 ---
 
-## Setup (30 seconds)
+## Setup
 
 ### 1. Open Terminal and start Claude
 
@@ -82,13 +82,22 @@ claude
 Help me install https://github.com/silships/figma-cli
 ```
 
-### 3. Initialize
+### 3. Connect to Figma
 
+**Option A: Yolo Mode (Recommended for personal Mac)**
 ```
 Initiate project
 ```
+Done! Claude patches Figma once and connects automatically.
 
-**Done.** Now talk to Claude about your Figma file.
+**Option B: Safe Mode (For corporate/restricted environments)**
+```
+Connect to Figma in safe mode
+```
+Then in Figma:
+1. **Plugins → Development → Import plugin from manifest**
+2. Select `plugin/manifest.json` from the cloned repo
+3. **Plugins → Development → FigCli** to start
 
 ---
 
@@ -105,6 +114,8 @@ Once connected, just talk to Claude:
 > "Export variables as CSS"
 
 The included `CLAUDE.md` teaches Claude all commands automatically. No manual required.
+
+**Safe Mode users:** Start the FigCli plugin each time you open Figma.
 
 ## Two Connection Modes
 
