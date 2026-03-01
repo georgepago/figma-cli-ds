@@ -1,6 +1,7 @@
 # figma-ds-cli
 
 <p align="center">
+  <img src="https://img.shields.io/badge/v1.1.1-blue" alt="Version 1.1.1">
   <img src="https://img.shields.io/badge/Figma-Desktop-purple" alt="Figma Desktop">
   <img src="https://img.shields.io/badge/No_API_Key-Required-green" alt="No API Key">
 </p>
@@ -27,22 +28,25 @@ A CLI that connects directly to Figma Desktop and gives you complete control:
 - **Design Tokens** — Create variables, collections, modes (Light/Dark), bind to nodes
 - **Create Anything** — Frames, text, shapes, icons (150k+ from Iconify), components
 - **Team Libraries** — Import and use components, styles, variables from any library
-- **Library Management** — Scan, register, and place components from team libraries
+- **Library Management** — Scan, register, and place components from team libraries (resolves: team library → local → alias → fuzzy match)
 - **Analyze Designs** — Colors, typography, spacing, find repeated patterns
 - **Lint & Accessibility** — Contrast checker, touch targets, design rules
 - **Export** — PNG, SVG, JSX, Storybook stories, CSS variables, Tailwind config
 - **Batch Operations** — Rename layers, find/replace text, create 100 variables at once
-- **Works with AI Assistants** — Just ask in natural language, your AI knows all commands
+- **Works with AI Assistants** — Just describe what you want in plain English, your AI handles the commands
 
 ## Why This CLI?
 
-This project includes a `CLAUDE.md` instruction file that AI coding assistants read automatically. It contains:
+This project ships with an AI instruction file that teaches any coding assistant all available commands, best practices, and common workflows — so you just talk naturally about your designs.
 
-- All available commands and their syntax
-- Best practices (e.g., "use `render` for text-heavy designs")
-- Common requests mapped to solutions
+**Works with any AI assistant** — ships as `CLAUDE.md` (read natively by Claude Code). For other tools, copy or symlink to their convention:
 
-**Works with any AI that reads project instructions** — Claude Code reads `CLAUDE.md` natively. For other tools, copy or symlink to their convention (e.g., `.cursorrules`, `.github/copilot-instructions.md`).
+| AI Tool | Convention |
+|---|---|
+| Claude Code | `CLAUDE.md` (included) |
+| Cursor | `.cursorrules` |
+| GitHub Copilot | `.github/copilot-instructions.md` |
+| Windsurf | `.windsurfrules` |
 
 **Want to teach your AI new tricks?** Just update the instruction file. No code changes needed.
 
@@ -52,6 +56,7 @@ This project includes a `CLAUDE.md` instruction file that AI coding assistants r
 
 ## What You Need
 
+- **macOS or Windows**
 - **Figma Desktop** (free account works)
 - **AI coding assistant** with terminal access (Claude Code, Cursor, GitHub Copilot, etc.)
 - **Node.js** (v18 or later)
@@ -87,7 +92,7 @@ Done! Now just talk to your AI about your designs.
 
 ## Using It
 
-Once connected, just ask your AI:
+Once connected, just ask your AI in plain language:
 
 > "Add shadcn colors to my project"
 
@@ -97,7 +102,9 @@ Once connected, just ask your AI:
 
 > "Export variables as CSS"
 
-The included `CLAUDE.md` instruction file teaches your AI all commands automatically. No manual required.
+You never need to learn or type CLI commands yourself. The included instruction file teaches your AI every command, so it translates your natural language into the right calls behind the scenes.
+
+For the full command reference, see [REFERENCE.md](REFERENCE.md). For advanced topics (architecture, techniques, FigJam), see the [docs/](docs/) folder.
 
 **Safe Mode users:** Start the FigCli plugin each time you open Figma.
 
@@ -242,7 +249,7 @@ Run Command Prompt or PowerShell as Administrator, then run `node src/index.js c
 
 ### Design Tokens & Variables
 
-- **Color presets** — shadcn (276 vars with Light/Dark mode), Radix UI (156 vars)
+- **Color presets** — shadcn (244 primitives + 32 semantic with Light/Dark mode), Radix UI (156 vars)
 - Create Tailwind CSS color palettes (all 22 color families, 50-950 shades)
 - Create and manage variable collections
 - **Variable modes** (Light/Dark/Mobile) with per-mode values
@@ -311,11 +318,14 @@ Run Command Prompt or PowerShell as Administrator, then run `node src/index.js c
 
 ### FigJam Support
 
-- Create sticky notes
+- Create sticky notes with custom colors
 - Create shapes with text
 - Connect elements with arrows
+- Move, update, and delete elements
 - List FigJam elements
 - Run JavaScript in FigJam context
+
+See [docs/FIGJAM.md](docs/FIGJAM.md) for the full FigJam command reference.
 
 ### Team Libraries
 
@@ -347,6 +357,7 @@ Components resolve in priority order: team library → local → alias → fuzzy
 - **Lorem ipsum generator** (words, sentences, paragraphs)
 - **Fill text with placeholder content**
 - **Insert images from URL**
+- **Remove image backgrounds** (`remove-bg`)
 - **Unsplash integration** (random stock photos by keyword)
 - **Contrast checker** (WCAG AA/AAA compliance)
 - **Check text contrast** against background
@@ -359,6 +370,7 @@ Components resolve in priority order: team library → local → alias → fuzzy
 - **Analyze colors** — usage frequency, variable bindings
 - **Analyze typography** — all font combinations used
 - **Analyze spacing** — gap/padding values, grid compliance
+- **Analyze websites** — `analyze-url` to inspect a live URL's structure and styles
 - **Find clusters** — detect repeated patterns (potential components)
 - **Visual diff** — compare two nodes
 - **Create diff patch** — structural patches between versions
@@ -374,6 +386,7 @@ Components resolve in priority order: team library → local → alias → fuzzy
   - `color-contrast` — WCAG AA/AAA compliance
   - `touch-target-size` — minimum 44x44 check
   - `min-text-size` — minimum 12px text
+- **Lint presets** — `recommended`, `strict`, `accessibility`, `design-system`
 - **Accessibility snapshot** — extract interactive elements tree
 
 ### Component Variants
@@ -409,6 +422,8 @@ Components resolve in priority order: team library → local → alias → fuzzy
 - Render complex UI from JSX-like syntax
 - Full programmatic control over Figma
 - Match vectors to Iconify icons
+- **Connection management** — `status`, `unpatch` (reverse Figma patch)
+- **Configuration** — `config set`/`config get` for persistent settings
 
 ### Not Supported (requires REST API)
 
