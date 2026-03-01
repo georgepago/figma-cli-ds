@@ -2,7 +2,7 @@
   "name": "figma-ds-cli",
   "version": "1.1.1",
   "description": "CLI for managing Figma design systems. Create variables, components, and more. No API key required.",
-  "author": "Sil Bormüller",
+  "author": "George Pago",
   "license": "MIT",
   "type": "module",
   "bin": {
@@ -20,11 +20,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/silships/figma-cli.git"
+    "url": "git+https://github.com/georgepago/figma-cli-ds.git"
   },
-  "homepage": "https://intodesignsystems.com",
+  "homepage": "https://github.com/georgepago/figma-cli-ds",
   "bugs": {
-    "url": "https://github.com/silships/figma-cli/issues"
+    "url": "https://github.com/georgepago/figma-cli-ds/issues"
   },
   "engines": {
     "node": ">=18"

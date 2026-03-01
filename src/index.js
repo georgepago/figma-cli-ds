@@ -13,6 +13,7 @@ import { createServer } from 'http';
 import { FigJamClient } from './figjam-client.js';
 import { FigmaClient } from './figma-client.js';
 import { isPatched, patchFigma, unpatchFigma, getFigmaCommand, getCdpPort } from './figma-patch.js';
+import { loadRegistry, saveRegistry, resolveComponent, addLocalComponents, addLibraryComponents, addAlias, listComponents } from './lib-registry.js';
 
 // Daemon configuration
 const DAEMON_PORT = 3456;
@@ -85,6 +86,10 @@ async function fastEval(code) {
 
 // Fast render via daemon (falls back to figma-use)
 async function fastRender(jsx) {
+  // Load registry for library component support
+  const hasLibInstances = /<Instance\s+[^>]*(lib|key)=/.test(jsx);
+  const registry = hasLibInstances ? loadRegistry() : null;
+
   // Try daemon first
   if (isDaemonRunning()) {
     try {
@@ -97,12 +102,12 @@ async function fastRender(jsx) {
   // Try direct connection
   try {
     const client = await getFigmaClient();
-    return await client.render(jsx);
+    return await client.render(jsx, registry);
   } catch (e) {
     // Fall back to npx figma-use
     const { FigmaClient } = await import('./figma-client.js');
     const tempClient = new FigmaClient();
-    const code = tempClient.parseJSX(jsx);
+    const code = tempClient.parseJSX(jsx, registry);
 
     const tempFile = '/tmp/figma-render-' + Date.now() + '.js';
     writeFileSync(tempFile, code);
@@ -665,7 +670,7 @@ program.action(async () => {
 });
 
 function showQuickStart() {
-  console.log(chalk.white('  Just ask Claude:\n'));
+  console.log(chalk.white('  Just ask your AI assistant:\n'));
   console.log(chalk.white('    "Add shadcn colors to my project"'));
   console.log(chalk.white('    "Create a blue card with rounded corners"'));
   console.log(chalk.white('    "Show me what\'s on the canvas"'));
@@ -778,7 +783,7 @@ program
     // Done!
     console.log(chalk.green('\n  ✓ Setup complete!\n'));
 
-    console.log(chalk.white('  Just ask Claude:\n'));
+    console.log(chalk.white('  Just ask your AI assistant:\n'));
     console.log(chalk.white('    "Add shadcn colors to my project"'));
     console.log(chalk.white('    "Create a blue card with rounded corners"'));
     console.log(chalk.white('    "Show me what\'s on the canvas"'));
@@ -1648,6 +1653,192 @@ collections
   .action((name) => {
     checkConnection();
     figmaUse(`collection create "${name}"`);
+  });
+
+// ============ COMPONENT LIBRARIES ============
+
+const lib = program
+  .command('library')
+  .alias('lib')
+  .description('Manage component libraries');
+
+lib
+  .command('scan')
+  .description('Scan current file for all components (local + library)')
+  .action(async () => {
+    await checkConnection();
+    const spinner = ora('Scanning for components...').start();
+    try {
+      const client = await getFigmaClient();
+      const result = await client.scanAllComponents();
+
+      const registry = loadRegistry();
+      addLocalComponents(result.local || [], registry);
+      addLibraryComponents(result.library || [], registry);
+      saveRegistry(registry);
+
+      const localCount = (result.local || []).length;
+      const libCount = (result.library || []).length;
+      spinner.succeed(`Found ${localCount} local, ${libCount} library components. Registry updated.`);
+
+      if (localCount > 0) {
+        console.log(chalk.cyan('\n  Local components:'));
+        for (const c of result.local.slice(0, 20)) {
+          console.log(chalk.gray(`    ${c.name}`) + chalk.dim(` (${c.id})`));
+        }
+        if (result.local.length > 20) console.log(chalk.dim(`    ... and ${result.local.length - 20} more`));
+      }
+
+      if (libCount > 0) {
+        console.log(chalk.cyan('\n  Library components:'));
+        for (const c of result.library.slice(0, 20)) {
+          console.log(chalk.gray(`    ${c.name}`) + chalk.dim(c.libraryName ? ` (${c.libraryName})` : ''));
+        }
+        if (result.library.length > 20) console.log(chalk.dim(`    ... and ${result.library.length - 20} more`));
+      }
+      console.log();
+    } catch (e) {
+      spinner.fail('Scan failed: ' + e.message);
+    }
+  });
+
+lib
+  .command('list')
+  .description('List registered components')
+  .option('--search <pattern>', 'Filter by name')
+  .option('--json', 'Output as JSON')
+  .action((options) => {
+    const registry = loadRegistry();
+    const results = listComponents(registry, options.search);
+
+    if (options.json) {
+      console.log(JSON.stringify(results, null, 2));
+      return;
+    }
+
+    if (results.length === 0) {
+      console.log(chalk.yellow('No components registered. Run `lib scan` first.'));
+      return;
+    }
+
+    const libraryComps = results.filter(r => r.source === 'library');
+    const localComps = results.filter(r => r.source === 'local');
+
+    if (libraryComps.length > 0) {
+      // Group by library name
+      const byLib = {};
+      for (const c of libraryComps) {
+        const lib = c.libraryName || 'Unknown library';
+        if (!byLib[lib]) byLib[lib] = [];
+        byLib[lib].push(c);
+      }
+      for (const [libName, comps] of Object.entries(byLib)) {
+        console.log(chalk.cyan(`\n  Library "${libName}" (${comps.length}):`));
+        for (const c of comps) {
+          console.log(chalk.white(`    ${c.name}`) + chalk.dim(` key:${c.key.slice(0, 12)}...`));
+        }
+      }
+    }
+
+    if (localComps.length > 0) {
+      console.log(chalk.cyan(`\n  Local (${localComps.length}):`));
+      for (const c of localComps) {
+        console.log(chalk.white(`    ${c.name}`) + chalk.dim(` id:${c.id}`) + (c.page ? chalk.dim(` page:${c.page}`) : ''));
+      }
+    }
+    console.log();
+  });
+
+lib
+  .command('place <name>')
+  .description('Place a component instance on canvas')
+  .option('-x <n>', 'X position')
+  .option('-y <n>', 'Y position')
+  .option('--props <json>', 'Property overrides as JSON')
+  .action(async (name, options) => {
+    await checkConnection();
+    const spinner = ora(`Placing "${name}"...`).start();
+    try {
+      const registry = loadRegistry();
+      const resolved = resolveComponent(name, registry);
+
+      if (!resolved) {
+        spinner.fail(`Component "${name}" not found in registry. Run \`lib scan\` to discover components.`);
+        return;
+      }
+
+      const client = await getFigmaClient();
+      const overrides = options.props ? JSON.parse(options.props) : {};
+      const x = options.x !== undefined ? parseInt(options.x) : getNextFreeX();
+      const y = options.y !== undefined ? parseInt(options.y) : 0;
+
+      let result;
+      if (resolved.type === 'library' && resolved.key) {
+        result = await client.createLibraryInstanceWithOverrides(resolved.key, overrides, x, y);
+      } else if (resolved.type === 'local' && resolved.id) {
+        result = await client.createInstance(resolved.id, x, y);
+        // Apply overrides for local components
+        if (Object.keys(overrides).length > 0) {
+          await client.eval(`
+            (async function() {
+              const inst = figma.getNodeById(${JSON.stringify(result.id)});
+              if (!inst) return;
+              try {
+                inst.setProperties(${JSON.stringify(overrides)});
+              } catch(e) {
+                for (const [k, v] of Object.entries(${JSON.stringify(overrides)})) {
+                  const tn = inst.findOne(n => n.type === 'TEXT' && n.name.toLowerCase() === k.toLowerCase());
+                  if (tn) { await figma.loadFontAsync(tn.fontName); tn.characters = String(v); }
+                }
+              }
+            })()
+          `);
+        }
+      } else {
+        spinner.fail(`Component "${name}" found but has no valid key or id.`);
+        return;
+      }
+
+      if (result && result.error) {
+        spinner.fail(`Failed: ${result.error}`);
+      } else {
+        spinner.succeed(`Placed "${result.name}" (${result.id})`);
+      }
+    } catch (e) {
+      spinner.fail('Place failed: ' + e.message);
+    }
+  });
+
+lib
+  .command('alias <alias> <componentName>')
+  .description('Create a name alias for a component')
+  .action((alias, componentName) => {
+    const registry = loadRegistry();
+    addAlias(alias, componentName, registry);
+    saveRegistry(registry);
+    console.log(chalk.green(`✓ Alias "${alias}" → "${componentName}"`));
+  });
+
+lib
+  .command('info <name>')
+  .description('Show details about a registered component')
+  .action((name) => {
+    const registry = loadRegistry();
+    const resolved = resolveComponent(name, registry);
+
+    if (!resolved) {
+      console.log(chalk.yellow(`Component "${name}" not found. Run \`lib scan\` to discover.`));
+      return;
+    }
+
+    console.log(chalk.cyan(`\n  Component: ${name}`));
+    console.log(chalk.white(`  Source: ${resolved.type}`));
+    if (resolved.key) console.log(chalk.white(`  Key: ${resolved.key}`));
+    if (resolved.id) console.log(chalk.white(`  ID: ${resolved.id}`));
+    if (resolved.libraryName) console.log(chalk.white(`  Library: ${resolved.libraryName}`));
+    if (resolved.page) console.log(chalk.white(`  Page: ${resolved.page}`));
+    if (resolved.description) console.log(chalk.white(`  Description: ${resolved.description}`));
+    console.log();
   });
 
 // ============ TOKENS (PRESETS) ============
@@ -4374,22 +4565,30 @@ program
         posX = getNextFreeX();
       }
 
-      // Use figma-use render directly - it has full JSX support
-      let cmd = 'npx figma-use render --stdin --json';
-      if (options.parent) cmd += ` --parent "${options.parent}"`;
-      if (posX !== undefined) cmd += ` --x ${posX}`;
-      cmd += ` --y ${posY}`;
+      // Always use our FigmaClient for variable auto-binding support
+      const hasLibInstances = /<Instance\s+[^>]*(lib|key)=/.test(jsx);
+      const registry = hasLibInstances ? loadRegistry() : null;
 
-      const output = execSync(cmd, {
-        input: jsx,
-        encoding: 'utf8',
-        stdio: ['pipe', 'pipe', 'pipe'],
-        timeout: 30000
-      });
+      // Try daemon first (uses our FigmaClient internally)
+      let result;
+      if (isDaemonRunning()) {
+        try {
+          result = await daemonExec('render', { jsx });
+        } catch (e) { /* fall through */ }
+      }
 
-      const result = JSON.parse(output.trim());
-      console.log(chalk.green('✓ Rendered: ' + result.id));
-      if (result.name) console.log(chalk.gray('  name: ' + result.name));
+      // Fallback to direct client
+      if (!result) {
+        const client = await getFigmaClient();
+        result = await client.render(jsx, registry);
+      }
+
+      if (result && result.id) {
+        console.log(chalk.green('✓ Rendered: ' + result.id));
+        if (result.name) console.log(chalk.gray('  name: ' + result.name));
+      } else {
+        console.log(chalk.green('✓ Rendered'));
+      }
     } catch (e) {
       console.log(chalk.red('✗ Render failed: ' + (e.stderr || e.message)));
     }
@@ -4415,17 +4614,30 @@ program
       let currentY = vertical ? getNextFreeY(gap) : 0;
       let results = [];
 
+      // Load registry once if any JSX uses library instances
+      const anyLibInstances = jsxArray.some(j => /<Instance\s+[^>]*(lib|key)=/.test(j));
+      const registry = anyLibInstances ? loadRegistry() : null;
+      let client = anyLibInstances ? await getFigmaClient() : null;
+
       for (const jsx of jsxArray) {
         try {
-          const cmd = `npx figma-use render --stdin --json --x ${currentX} --y ${currentY}`;
-          const output = execSync(cmd, {
-            input: jsx,
-            encoding: 'utf8',
-            stdio: ['pipe', 'pipe', 'pipe'],
-            timeout: 30000
-          });
+          let result;
+          const hasLibInstances = /<Instance\s+[^>]*(lib|key)=/.test(jsx);
 
-          const result = JSON.parse(output.trim());
+          if (hasLibInstances) {
+            if (!client) client = await getFigmaClient();
+            result = await client.render(jsx, registry);
+          } else {
+            const cmd = `npx figma-use render --stdin --json --x ${currentX} --y ${currentY}`;
+            const output = execSync(cmd, {
+              input: jsx,
+              encoding: 'utf8',
+              stdio: ['pipe', 'pipe', 'pipe'],
+              timeout: 30000
+            });
+            result = JSON.parse(output.trim());
+          }
+
           results.push(result);
           console.log(chalk.green('✓ Rendered: ' + result.id + (result.name ? ' (' + result.name + ')' : '')));
 

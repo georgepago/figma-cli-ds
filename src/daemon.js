@@ -11,6 +11,7 @@
 import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { FigmaClient } from './figma-client.js';
+import { loadRegistry } from './lib-registry.js';
 
 const PORT = parseInt(process.env.DAEMON_PORT) || 3456;
 const MODE = process.env.DAEMON_MODE || 'auto'; // 'auto', 'cdp', 'plugin'
@@ -205,14 +206,18 @@ async function handleRequest(req, res) {
             case 'render':
               // Parse JSX to code, then execute via unified eval (works with both CDP and Plugin)
               const parser = new FigmaClient();
-              const renderCode = parser.parseJSX(jsx);
+              const hasLib = /<Instance\s+[^>]*(lib|key)=/.test(jsx);
+              const reg = hasLib ? loadRegistry() : null;
+              const renderCode = parser.parseJSX(jsx, reg);
               result = await execWithTimeout(() => executeEval(renderCode));
               break;
             case 'render-batch':
               const batchParser = new FigmaClient();
+              const anyLib = (jsxArray || []).some(j => /<Instance\s+[^>]*(lib|key)=/.test(j));
+              const batchReg = anyLib ? loadRegistry() : null;
               result = [];
               for (const j of jsxArray) {
-                const batchCode = batchParser.parseJSX(j);
+                const batchCode = batchParser.parseJSX(j, batchReg);
                 result.push(await execWithTimeout(() => executeEval(batchCode)));
               }
               break;

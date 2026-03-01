@@ -273,16 +273,25 @@ export class FigmaClient {
   /**
    * Render JSX-like syntax to Figma
    */
-  async render(jsx) {
-    // Parse JSX and generate Figma code
-    const code = this.parseJSX(jsx);
-    return await this.eval(code);
+  async render(jsx, registry = null) {
+    // Parse JSX and generate Figma code, with rollback on failure
+    const code = this.parseJSX(jsx, registry);
+    const safeCode = `(async function() {
+      const __before = new Set(figma.currentPage.children.map(n => n.id));
+      try {
+        return await (async () => { return ${code} })();
+      } catch(e) {
+        figma.currentPage.children.filter(n => !__before.has(n.id)).forEach(n => n.remove());
+        throw e;
+      }
+    })()`;
+    return await this.eval(safeCode);
   }
 
   /**
    * Parse JSX-like syntax to Figma Plugin API code
    */
-  parseJSX(jsx) {
+  parseJSX(jsx, registry = null) {
     // Find opening Frame tag
     const openMatch = jsx.match(/<Frame\s+([^>]*)>/);
     if (!openMatch) {
@@ -301,16 +310,68 @@ export class FigmaClient {
     // Parse children
     const childElements = this.parseChildren(children);
 
+    // Resolve <Instance lib="..."> elements via registry
+    if (registry) {
+      this._resolveInstancesFromRegistry(childElements, registry);
+    }
+
     // Warn if children content exists but nothing was parsed
     const trimmedChildren = children.trim();
     if (trimmedChildren && childElements.length === 0) {
       console.warn('[render] Warning: Frame has content but no elements were parsed.');
       console.warn('[render] Content:', trimmedChildren.slice(0, 200) + (trimmedChildren.length > 200 ? '...' : ''));
-      console.warn('[render] Supported elements: <Frame>, <Text>, <Rectangle>, <Rect>, <Image>, <Icon>');
+      console.warn('[render] Supported elements: <Frame>, <Text>, <Rectangle>, <Rect>, <Image>, <Icon>, <Instance>');
     }
 
     // Generate code
     return this.generateCode(props, childElements);
+  }
+
+  _resolveInstancesFromRegistry(children, registry) {
+    for (const child of children) {
+      if (child._type === 'instance' && child.lib) {
+        const resolved = this._registryResolve(child.lib, registry);
+        if (resolved) {
+          child._resolvedKey = resolved.key || null;
+          child._resolvedId = resolved.id || null;
+          child._resolvedType = resolved.type;
+        }
+      }
+      // Recurse into nested frames
+      if (child._children) {
+        this._resolveInstancesFromRegistry(child._children, registry);
+      }
+    }
+  }
+
+  _registryResolve(name, registry) {
+    if (!registry) return null;
+    const normalized = name.toLowerCase().trim();
+
+    // Direct match in library
+    if (registry.library) {
+      for (const [compName, data] of Object.entries(registry.library)) {
+        if (compName === name || compName.toLowerCase() === normalized) {
+          return { ...data, type: 'library' };
+        }
+      }
+    }
+
+    // Direct match in local
+    if (registry.local) {
+      for (const [compName, data] of Object.entries(registry.local)) {
+        if (compName === name || compName.toLowerCase() === normalized) {
+          return { ...data, type: 'local' };
+        }
+      }
+    }
+
+    // Alias lookup
+    if (registry.aliases && registry.aliases[normalized]) {
+      return this._registryResolve(registry.aliases[normalized], registry);
+    }
+
+    return null;
   }
 
   /**
@@ -518,10 +579,7 @@ export class FigmaClient {
 
           return `
         const el${idx} = figma.createText();
-        el${idx}.fontName = {family:'Inter',style:'${style}'};
-        el${idx}.fontSize = ${size};
-        el${idx}.characters = ${JSON.stringify(item.content)};
-        el${idx}.fills = [{type:'SOLID',color:${this.hexToRgbCode(color)}}];
+        ${this._generateTextCode(`el${idx}`, size, style, color, JSON.stringify(item.content))}
         ${parentVar}.appendChild(el${idx});
         ${fillWidth ? `el${idx}.layoutSizingHorizontal = 'FILL'; el${idx}.textAutoResize = 'HEIGHT';` : ''}`;
         } else if (item._type === 'frame') {
@@ -573,8 +631,8 @@ export class FigmaClient {
         el${idx}.paddingLeft = ${fPx};
         el${idx}.paddingRight = ${fPx};
         el${idx}.cornerRadius = ${fRounded};
-        el${idx}.fills = [{type:'SOLID',color:${this.hexToRgbCode(fBg)}}];
-        ${fStroke ? `el${idx}.strokes = [{type:'SOLID',color:${this.hexToRgbCode(fStroke)}}]; el${idx}.strokeWeight = 1;` : ''}
+        ${this._generateFillCode(`el${idx}`, fBg)}
+        ${fStroke ? this._generateStrokeCode(`el${idx}`, fStroke) : ''}
         el${idx}.primaryAxisAlignItems = '${fJustifyVal}';
         el${idx}.counterAxisAlignItems = '${fAlignVal}';
         el${idx}.clipsContent = ${fClip};
@@ -593,7 +651,7 @@ export class FigmaClient {
         el${idx}.name = ${JSON.stringify(rName)};
         el${idx}.resize(${rWidth}, ${rHeight});
         el${idx}.cornerRadius = ${rRounded};
-        el${idx}.fills = [{type:'SOLID',color:${this.hexToRgbCode(rBg)}}];
+        ${this._generateFillCode(`el${idx}`, rBg)}
         ${parentVar}.appendChild(el${idx});`;
         } else if (item._type === 'image') {
           // Image placeholder (gray rectangle with image icon concept)
@@ -608,7 +666,7 @@ export class FigmaClient {
         el${idx}.name = ${JSON.stringify(iName)};
         el${idx}.resize(${iWidth}, ${iHeight});
         el${idx}.cornerRadius = ${iRounded};
-        el${idx}.fills = [{type:'SOLID',color:${this.hexToRgbCode(iBg)}}];
+        ${this._generateFillCode(`el${idx}`, iBg)}
         ${parentVar}.appendChild(el${idx});`;
         } else if (item._type === 'icon') {
           // Icon placeholder (small square)
@@ -621,20 +679,64 @@ export class FigmaClient {
         el${idx}.name = ${JSON.stringify(icName)};
         el${idx}.resize(${icSize}, ${icSize});
         el${idx}.cornerRadius = ${Math.round(icSize / 4)};
-        el${idx}.fills = [{type:'SOLID',color:${this.hexToRgbCode(icBg)}}];
+        ${this._generateFillCode(`el${idx}`, icBg)}
         ${parentVar}.appendChild(el${idx});`;
         } else if (item._type === 'instance') {
           // Component instance
           const compId = item.component || item.id;
           const compName = item.name;
+          const compKey = item.key || null;
+          const libName = item.lib || null;
 
-          if (compId) {
-            // Create instance by component ID
+          // Collect text/property overrides from instance props
+          const overrideProps = {};
+          for (const [k, v] of Object.entries(item)) {
+            if (!['_type', '_index', 'component', 'id', 'name', 'key', 'lib',
+                  '_resolvedKey', '_resolvedId', '_resolvedType'].includes(k)) {
+              overrideProps[k] = v;
+            }
+          }
+          const hasOverrides = Object.keys(overrideProps).length > 0;
+          const overridesJson = JSON.stringify(overrideProps);
+
+          // Library component by key (direct or resolved from registry)
+          const resolvedKey = compKey || item._resolvedKey;
+          const resolvedId = item._resolvedId;
+
+          if (resolvedKey) {
+            // Import library component by key and create instance
             return `
-        const comp${idx} = figma.getNodeById(${JSON.stringify(compId)});
+        const comp${idx} = await figma.importComponentByKeyAsync(${JSON.stringify(resolvedKey)});
+        const el${idx} = comp${idx}.createInstance();
+        ${parentVar}.appendChild(el${idx});
+        ${hasOverrides ? `
+        try {
+          const ov${idx} = ${overridesJson};
+          el${idx}.setProperties(ov${idx});
+        } catch(e) {
+          const ov${idx} = ${overridesJson};
+          for (const [k, v] of Object.entries(ov${idx})) {
+            const tn = el${idx}.findOne(n => n.type === 'TEXT' && n.name.toLowerCase() === k.toLowerCase());
+            if (tn) { await figma.loadFontAsync(tn.fontName); tn.characters = String(v); }
+          }
+        }` : ''}`;
+          } else if (resolvedId || compId) {
+            // Create instance by component ID (local)
+            const theId = resolvedId || compId;
+            return `
+        const comp${idx} = figma.getNodeById(${JSON.stringify(theId)});
         if (comp${idx} && comp${idx}.type === 'COMPONENT') {
           const el${idx} = comp${idx}.createInstance();
           ${parentVar}.appendChild(el${idx});
+          ${hasOverrides ? `
+          try {
+            el${idx}.setProperties(${overridesJson});
+          } catch(e) {
+            for (const [k, v] of Object.entries(${overridesJson})) {
+              const tn = el${idx}.findOne(n => n.type === 'TEXT' && n.name.toLowerCase() === k.toLowerCase());
+              if (tn) { await figma.loadFontAsync(tn.fontName); tn.characters = String(v); }
+            }
+          }` : ''}
         }`;
           } else if (compName) {
             // Find component by name and create instance
@@ -643,6 +745,32 @@ export class FigmaClient {
         if (comp${idx}) {
           const el${idx} = comp${idx}.createInstance();
           ${parentVar}.appendChild(el${idx});
+          ${hasOverrides ? `
+          try {
+            el${idx}.setProperties(${overridesJson});
+          } catch(e) {
+            for (const [k, v] of Object.entries(${overridesJson})) {
+              const tn = el${idx}.findOne(n => n.type === 'TEXT' && n.name.toLowerCase() === k.toLowerCase());
+              if (tn) { await figma.loadFontAsync(tn.fontName); tn.characters = String(v); }
+            }
+          }` : ''}
+        }`;
+          } else if (libName && !resolvedKey && !resolvedId) {
+            // lib="..." but no registry match — try finding by name on all pages
+            return `
+        const comp${idx} = figma.root.findOne(n => n.type === 'COMPONENT' && n.name.toLowerCase() === ${JSON.stringify(libName.toLowerCase())});
+        if (comp${idx}) {
+          const el${idx} = comp${idx}.createInstance();
+          ${parentVar}.appendChild(el${idx});
+          ${hasOverrides ? `
+          try {
+            el${idx}.setProperties(${overridesJson});
+          } catch(e) {
+            for (const [k, v] of Object.entries(${overridesJson})) {
+              const tn = el${idx}.findOne(n => n.type === 'TEXT' && n.name.toLowerCase() === k.toLowerCase());
+              if (tn) { await figma.loadFontAsync(tn.fontName); tn.characters = String(v); }
+            }
+          }` : ''}
         }`;
           }
           return '';
@@ -675,6 +803,7 @@ export class FigmaClient {
     return `
       (async function() {
         await Promise.all([${fontLoads || 'figma.loadFontAsync({family:"Inter",style:"Regular"})'}]);
+        ${this._generatePreamble()}
 
         ${smartPosCode}
 
@@ -684,8 +813,8 @@ export class FigmaClient {
         frame.x = smartX;
         frame.y = ${y};
         frame.cornerRadius = ${rounded};
-        frame.fills = [{type:'SOLID',color:${this.hexToRgbCode(bg)}}];
-        ${stroke ? `frame.strokes = [{type:'SOLID',color:${this.hexToRgbCode(stroke)}}]; frame.strokeWeight = 1;` : ''}
+        ${this._generateFillCode('frame', bg)}
+        ${stroke ? this._generateStrokeCode('frame', stroke) : ''}
         frame.layoutMode = '${flex === 'row' ? 'HORIZONTAL' : 'VERTICAL'}';
         frame.itemSpacing = ${gap};
         frame.paddingTop = ${py};
@@ -707,6 +836,145 @@ export class FigmaClient {
 
   hexToRgbCode(hex) {
     return `{r:${parseInt(hex.slice(1,3),16)/255},g:${parseInt(hex.slice(3,5),16)/255},b:${parseInt(hex.slice(5,7),16)/255}}`;
+  }
+
+  _normalizeHex(hex) {
+    if (!hex || typeof hex !== 'string') return '#000000';
+    hex = hex.trim();
+    if (!hex.startsWith('#')) hex = '#' + hex;
+    if (hex.length === 4) {
+      hex = '#' + hex[1] + hex[1] + hex[2] + hex[2] + hex[3] + hex[3];
+    }
+    return hex;
+  }
+
+  _generatePreamble() {
+    return `
+        // Auto-resolve variables & text styles (local + linked libraries)
+        const __colorVarMap = new Map();
+        const __tsArr = [];
+
+        // Helper to index a variable by its resolved RGB value
+        function __indexVar(v) {
+          try {
+            let val = Object.values(v.valuesByMode)[0];
+            let depth = 0;
+            while (val && val.type === 'VARIABLE_ALIAS' && depth < 5) {
+              const aliased = figma.variables.getVariableById(val.id);
+              if (!aliased) break;
+              val = Object.values(aliased.valuesByMode)[0];
+              depth++;
+            }
+            if (val && typeof val.r === 'number') {
+              const key = Math.round(val.r*255)+','+Math.round(val.g*255)+','+Math.round(val.b*255);
+              if (!__colorVarMap.has(key)) __colorVarMap.set(key, v);
+            }
+          } catch(e) {}
+        }
+
+        // 1) Index local variables
+        try {
+          const __localVars = figma.variables.getLocalVariables('COLOR');
+          for (const v of __localVars) __indexVar(v);
+        } catch(e) {}
+
+        // 2) Index linked library variables (parallel imports)
+        try {
+          const __libColls = await figma.teamLibrary.getAvailableLibraryVariableCollectionsAsync();
+          const __colorKeys = [];
+          for (const coll of __libColls) {
+            try {
+              const libVars = await figma.teamLibrary.getVariablesInLibraryCollectionAsync(coll.key);
+              for (const lv of libVars) {
+                if (lv.resolvedType === 'COLOR') __colorKeys.push(lv.key);
+              }
+            } catch(e) {}
+          }
+          const __imported = await Promise.all(__colorKeys.map(k => figma.variables.importVariableByKeyAsync(k).catch(() => null)));
+          for (const v of __imported) { if (v) __indexVar(v); }
+        } catch(e) {}
+
+        // 3) Index text styles (local + library, parallel imports)
+        try {
+          const __styles = figma.getLocalTextStyles();
+          for (const s of __styles) {
+            __tsArr.push({id:s.id, name:s.name, fontSize:s.fontSize, fontFamily:s.fontName.family, fontStyle:s.fontName.style});
+          }
+        } catch(e) {}
+        try {
+          const __libStyles = await figma.teamLibrary.getAvailableLibraryTextStylesAsync();
+          const __styleImports = await Promise.all(__libStyles.map(ls => figma.importStyleByKeyAsync(ls.key).catch(() => null)));
+          for (const s of __styleImports) {
+            if (s && s.type === 'TEXT') {
+              __tsArr.push({id:s.id, name:s.name, fontSize:s.fontSize, fontFamily:s.fontName.family, fontStyle:s.fontName.style});
+            }
+          }
+        } catch(e) {}
+
+        function __findColorVar(r,g,b) { return __colorVarMap.get(r+','+g+','+b) || null; }
+        function __applyFill(node, r, g, b) {
+          const v = __findColorVar(r,g,b);
+          const paint = {type:'SOLID',color:{r:r/255,g:g/255,b:b/255}};
+          if (v) {
+            try {
+              const bound = figma.variables.setBoundVariableForPaint(paint, 'color', v);
+              node.fills = [bound];
+            } catch(e) { node.fills = [paint]; }
+          } else { node.fills = [paint]; }
+        }
+        function __applyStroke(node, r, g, b) {
+          const v = __findColorVar(r,g,b);
+          const paint = {type:'SOLID',color:{r:r/255,g:g/255,b:b/255}};
+          if (v) {
+            try {
+              const bound = figma.variables.setBoundVariableForPaint(paint, 'color', v);
+              node.strokes = [bound];
+            } catch(e) { node.strokes = [paint]; }
+          } else { node.strokes = [paint]; }
+        }
+        function __findTextStyle(fontSize, fontStyle) {
+          let match = __tsArr.find(s => s.fontSize === fontSize && s.fontStyle === fontStyle);
+          if (!match) match = __tsArr.find(s => s.fontSize === fontSize);
+          return match || null;
+        }
+    `;
+  }
+
+  _generateFillCode(nodeVar, hex) {
+    const h = this._normalizeHex(hex);
+    const r = parseInt(h.slice(1,3), 16);
+    const g = parseInt(h.slice(3,5), 16);
+    const b = parseInt(h.slice(5,7), 16);
+    return `__applyFill(${nodeVar}, ${r}, ${g}, ${b});`;
+  }
+
+  _generateStrokeCode(nodeVar, hex) {
+    const h = this._normalizeHex(hex);
+    const r = parseInt(h.slice(1,3), 16);
+    const g = parseInt(h.slice(3,5), 16);
+    const b = parseInt(h.slice(5,7), 16);
+    return `__applyStroke(${nodeVar}, ${r}, ${g}, ${b}); ${nodeVar}.strokeWeight = 1;`;
+  }
+
+  _generateTextCode(nodeVar, fontSize, fontStyle, colorHex, contentStr) {
+    const h = this._normalizeHex(colorHex);
+    const r = parseInt(h.slice(1,3), 16);
+    const g = parseInt(h.slice(3,5), 16);
+    const b = parseInt(h.slice(5,7), 16);
+    return `{
+          const _ts = __findTextStyle(${fontSize}, '${fontStyle}');
+          if (_ts) {
+            await figma.loadFontAsync({family:_ts.fontFamily, style:_ts.fontStyle});
+            ${nodeVar}.fontName = {family:_ts.fontFamily, style:_ts.fontStyle};
+            ${nodeVar}.characters = ${contentStr};
+            ${nodeVar}.textStyleId = _ts.id;
+          } else {
+            ${nodeVar}.fontName = {family:'Inter',style:'${fontStyle}'};
+            ${nodeVar}.fontSize = ${fontSize};
+            ${nodeVar}.characters = ${contentStr};
+          }
+          __applyFill(${nodeVar}, ${r}, ${g}, ${b});
+        }`;
   }
 
   // ============ Node Operations ============
@@ -1212,7 +1480,9 @@ export class FigmaClient {
   async getComponents() {
     return await this.eval(`
       figma.root.findAll(n => n.type === 'COMPONENT').map(c => ({
-        id: c.id, name: c.name, page: c.parent?.parent?.name
+        id: c.id, name: c.name, key: c.key, page: c.parent?.parent?.name,
+        description: c.description || '', remote: c.remote || false,
+        variantGroup: c.parent?.type === 'COMPONENT_SET' ? c.parent.name : null
       }))
     `);
   }
@@ -1606,6 +1876,70 @@ export class FigmaClient {
         instance.swapComponent(newComponent);
 
         return { success: true, newComponentName: newComponent.name };
+      })()
+    `);
+  }
+
+  /**
+   * Scan all components: local + library (from instances on canvas)
+   */
+  async scanAllComponents() {
+    return await this.eval(`
+      (async function() {
+        const local = figma.root.findAll(n => n.type === 'COMPONENT').map(c => ({
+          id: c.id, name: c.name, key: c.key, page: c.parent?.parent?.name,
+          description: c.description || '', remote: c.remote || false,
+          variantGroup: c.parent?.type === 'COMPONENT_SET' ? c.parent.name : null
+        }));
+
+        const library = [];
+        const seen = new Set();
+        const instances = figma.root.findAll(n => n.type === 'INSTANCE');
+        for (const instance of instances) {
+          try {
+            const main = await instance.getMainComponentAsync();
+            if (main && main.remote && !seen.has(main.key)) {
+              seen.add(main.key);
+              library.push({
+                key: main.key,
+                name: main.name,
+                description: main.description || '',
+                libraryName: main.parent?.type === 'COMPONENT_SET' ? main.parent.name : null
+              });
+            }
+          } catch {}
+        }
+
+        return { local, library };
+      })()
+    `);
+  }
+
+  /**
+   * Create a library component instance with property overrides
+   */
+  async createLibraryInstanceWithOverrides(componentKey, overrides = {}, x, y) {
+    return await this.eval(`
+      (async function() {
+        const component = await figma.importComponentByKeyAsync(${JSON.stringify(componentKey)});
+        const instance = component.createInstance();
+        ${x !== undefined ? `instance.x = ${x};` : ''}
+        ${y !== undefined ? `instance.y = ${y};` : ''}
+
+        const overrides = ${JSON.stringify(overrides)};
+        for (const [prop, value] of Object.entries(overrides)) {
+          try {
+            instance.setProperties({ [prop]: value });
+          } catch(e) {
+            const textNode = instance.findOne(n => n.type === 'TEXT' && n.name.toLowerCase() === prop.toLowerCase());
+            if (textNode) {
+              await figma.loadFontAsync(textNode.fontName);
+              textNode.characters = String(value);
+            }
+          }
+        }
+
+        return { id: instance.id, name: instance.name, x: instance.x, y: instance.y };
       })()
     `);
   }

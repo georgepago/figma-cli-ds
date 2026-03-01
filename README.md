@@ -1,16 +1,14 @@
 # figma-ds-cli
 
 <p align="center">
-  <a href="https://intodesignsystems.com"><img src="https://img.shields.io/badge/Into_Design_Systems-intodesignsystems.com-ff6b35" alt="Into Design Systems"></a>
   <img src="https://img.shields.io/badge/Figma-Desktop-purple" alt="Figma Desktop">
   <img src="https://img.shields.io/badge/No_API_Key-Required-green" alt="No API Key">
-  <img src="https://img.shields.io/badge/Claude_Code-Ready-blue" alt="Claude Code">
 </p>
 
 <p align="center">
-  <b>Control Figma Desktop with Claude Code.</b><br>
+  <b>Control Figma Desktop with your AI coding assistant.</b><br>
   Full read/write access. No API key required.<br>
-  Just talk to Claude about your designs.
+  Just talk to your AI about your designs.
 </p>
 
 ```
@@ -29,32 +27,34 @@ A CLI that connects directly to Figma Desktop and gives you complete control:
 - **Design Tokens** — Create variables, collections, modes (Light/Dark), bind to nodes
 - **Create Anything** — Frames, text, shapes, icons (150k+ from Iconify), components
 - **Team Libraries** — Import and use components, styles, variables from any library
+- **Library Management** — Scan, register, and place components from team libraries
 - **Analyze Designs** — Colors, typography, spacing, find repeated patterns
 - **Lint & Accessibility** — Contrast checker, touch targets, design rules
 - **Export** — PNG, SVG, JSX, Storybook stories, CSS variables, Tailwind config
 - **Batch Operations** — Rename layers, find/replace text, create 100 variables at once
-- **Works with Claude Code** — Just ask in natural language, Claude knows all commands
+- **Works with AI Assistants** — Just ask in natural language, your AI knows all commands
 
 ## Why This CLI?
 
-This project includes a `CLAUDE.md` file that Claude reads automatically. It contains:
+This project includes a `CLAUDE.md` instruction file that AI coding assistants read automatically. It contains:
 
 - All available commands and their syntax
 - Best practices (e.g., "use `render` for text-heavy designs")
 - Common requests mapped to solutions
 
-**Want to teach Claude new tricks?** Just update `CLAUDE.md`. No code changes needed.
+**Works with any AI that reads project instructions** — Claude Code reads `CLAUDE.md` natively. For other tools, copy or symlink to their convention (e.g., `.cursorrules`, `.github/copilot-instructions.md`).
 
-**Example:** You type "Create Tailwind colors" → Claude already knows to run `node src/index.js tokens tailwind` because it's documented in `CLAUDE.md`.
+**Want to teach your AI new tricks?** Just update the instruction file. No code changes needed.
+
+**Example:** You type "Create Tailwind colors" → your AI already knows to run `node src/index.js tokens tailwind` because it's documented in the instruction file.
 
 ---
 
 ## What You Need
 
 - **Figma Desktop** (free account works)
-- **Claude Code** ([get it here](https://www.anthropic.com/claude-code))
+- **AI coding assistant** with terminal access (Claude Code, Cursor, GitHub Copilot, etc.)
 - **Node.js** (v18 or later)
-- **macOS or Windows** (macOS recommended, Windows supported)
 
 ---
 
@@ -63,12 +63,12 @@ This project includes a `CLAUDE.md` file that Claude reads automatically. It con
 ### 1. Clone & Open
 
 ```bash
-git clone https://github.com/silships/figma-cli.git
-cd figma-cli
-claude
+git clone https://github.com/georgepago/figma-cli-ds.git
+cd figma-cli-ds
+npm install
 ```
 
-**IMPORTANT:** Start Claude Code from the figma-cli folder so it can read the instructions.
+**IMPORTANT:** Start your AI assistant from the figma-cli-ds folder so it can read the project instructions.
 
 ### 2. Connect
 
@@ -77,17 +77,17 @@ Just say:
 Connect to Figma
 ```
 
-Claude asks which connection mode:
+Your AI assistant will ask which connection mode:
 - **Yolo Mode (Recommended)** — Fully automatic, secure random port
 - **Safe Mode** — For corporate/restricted environments
 
-Done! Now just talk to Claude about your designs.
+Done! Now just talk to your AI about your designs.
 
 ---
 
 ## Using It
 
-Once connected, just talk to Claude:
+Once connected, just ask your AI:
 
 > "Add shadcn colors to my project"
 
@@ -97,7 +97,7 @@ Once connected, just talk to Claude:
 
 > "Export variables as CSS"
 
-The included `CLAUDE.md` teaches Claude all commands automatically. No manual required.
+The included `CLAUDE.md` instruction file teaches your AI all commands automatically. No manual required.
 
 **Safe Mode users:** Start the FigCli plugin each time you open Figma.
 
@@ -226,15 +226,9 @@ sudo sed -i '' 's/remote-debugging-port/remote-debugXing-port/g' /Applications/F
 sudo codesign --force --deep --sign - /Applications/Figma.app
 ```
 
-### Windows
+### Windows Permission Error
 
-Windows is supported but less tested than macOS.
-
-**Permission Error:** Run Command Prompt or PowerShell as Administrator, then run `node src/index.js connect`.
-
-**Figma Location:** The CLI expects Figma at `%LOCALAPPDATA%\Figma\Figma.exe` (default install location).
-
-**Safe Mode:** If Yolo Mode doesn't work, use Safe Mode: `node src/index.js connect --safe`
+Run Command Prompt or PowerShell as Administrator, then run `node src/index.js connect`.
 
 ### Figma Not Connecting
 
@@ -255,6 +249,10 @@ Windows is supported but less tested than macOS.
 - **Batch create** up to 100 variables at once
 - **Batch update** variable values across modes
 - Bind variables to node properties (fill, stroke, gap, padding, radius)
+- **Spacing tokens** — `tokens spacing` for spacing scale
+- **Border radius tokens** — `tokens radii` for radius scale
+- **Import from JSON** — `tokens import <file>` for custom token files
+- **IDS Base** — `tokens ds` for full design system (variables + components)
 - Export variables as CSS custom properties
 - Export variables as Tailwind config
 
@@ -329,6 +327,18 @@ Windows is supported but less tested than macOS.
 - Bind library variables to node properties
 - Swap component instances to different library components
 - List all enabled libraries
+
+### Library Management (Registry)
+
+Components resolve in priority order: team library → local → alias → fuzzy match. Existing design system components are always preferred over creating new ones.
+
+- **Scan components** — discover local + library components (`lib scan`)
+- **Component registry** — persistent storage at `~/.figma-ds-cli/components.json`
+- **Place by name** — `lib place "Button"` with smart auto-positioning
+- **Property overrides** — `lib place "Input" --props '{"text": "Email"}'`
+- **Aliases** — create shortcuts (`lib alias "btn" "Button / Primary"`)
+- **Component info** — view metadata, key, library name (`lib info "Button"`)
+- **JSX integration** — `<Instance lib="Button" />` in render commands
 
 ### Designer Utilities
 
@@ -410,20 +420,15 @@ Windows is supported but less tested than macOS.
 
 ## Author
 
-**[Sil Bormüller](https://www.linkedin.com/in/silbormueller/)** — [intodesignsystems.com](https://intodesignsystems.com)
+Forked and maintained by **George Pago** — [github.com/georgepago](https://github.com/georgepago)
+
+Originally created by **[Sil Bormüller](https://www.linkedin.com/in/silbormueller/)** — [intodesignsystems.com](https://intodesignsystems.com)
 
 ## Powered By
 
-This CLI is built on top of **[figma-use](https://github.com/dannote/figma-use)** by [dannote](https://github.com/dannote) — an excellent Figma CLI with JSX rendering, XPath queries, design linting, and much more.
+Forked from **[figma-cli](https://github.com/silships/figma-cli)** by [Sil Bormüller](https://github.com/silships), which is built on **[figma-use](https://github.com/dannote/figma-use)** by [dannote](https://github.com/dannote).
 
-We use figma-use for:
-- JSX rendering (`render` command)
-- Node operations (`node tree`, `node to-component`, etc.)
-- Design analysis (`analyze colors`, `analyze typography`)
-- Design linting (`lint`)
-- And many other features
-
-**Big thanks to dannote for figma-use!**
+**Big thanks to both projects!**
 
 ## License
 

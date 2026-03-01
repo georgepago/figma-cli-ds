@@ -17,6 +17,9 @@ CLI that controls Figma Desktop directly. No API key needed.
 | "find nodes named X" | `node src/index.js find "X"` |
 | "what's on canvas" | `node src/index.js canvas info` |
 | "export as PNG/SVG" | `node src/index.js export png` |
+| "scan for components" | `node src/index.js lib scan` |
+| "list library components" | `node src/index.js lib list` |
+| "place a button" | `node src/index.js lib place "Button"` |
 
 **Full command reference:** See REFERENCE.md
 
@@ -94,6 +97,45 @@ node src/index.js bind fill "zinc/900" -n "ID1"
 
 ---
 
+## Using Library Components
+
+When creating screens, prefer using existing components from the user's design library instead of building from scratch.
+
+**Step 1: Discover components**
+```bash
+node src/index.js lib scan              # Scans file for local + library components
+node src/index.js lib list              # Shows all registered components
+node src/index.js lib list --search "Button"  # Filter by name
+```
+
+**Step 2: Place component instances**
+```bash
+node src/index.js lib place "Button"                           # Smart positioned
+node src/index.js lib place "Input" --props '{"text": "Email"}'  # With overrides
+```
+
+**Step 3: Mix with JSX render**
+```bash
+node src/index.js render '<Frame name="Login" w={400} flex="col" gap={16} p={32} bg="#fff" rounded={16}>
+  <Text size={24} weight="bold" color="#000">Sign In</Text>
+  <Instance lib="Input" text="Email" />
+  <Instance lib="Input" text="Password" />
+  <Instance lib="Button" text="Sign In" />
+</Frame>'
+```
+
+**Instance types:**
+- `<Instance lib="Button" />` — looks up component from registry (run `lib scan` first)
+- `<Instance key="abc123" />` — imports library component directly by key
+- `<Instance name="Button" />` — finds local component by exact name on current page
+- `<Instance component="1:234" />` — uses local component by Figma node ID
+
+**Aliases:** `node src/index.js lib alias "btn" "Button / Primary"` — then use `<Instance lib="btn" />`
+
+**Key rule:** Always run `lib scan` first to populate the registry. Library components from team libraries are discovered from instances already on canvas.
+
+---
+
 ## Creating Webpages
 
 Create ONE parent frame with vertical auto-layout containing all sections:
@@ -134,26 +176,13 @@ stroke="#000"     // stroke color
 <Text size={18} weight="bold" color="#000">Hello</Text>
 ```
 
-**Common mistakes (silently ignored, no error!):**
+**Common mistakes:**
 ```
 WRONG                    RIGHT
 layout="horizontal"   →  flex="row"
 padding={24}          →  p={24}
 fill="#fff"           →  bg="#fff"
 cornerRadius={12}     →  rounded={12}
-fontSize={18}         →  size={18}
-fontWeight="bold"     →  weight="bold"
-```
-
-**Complete card example:**
-```bash
-node src/index.js render '<Frame name="Card" w={320} h={200} bg="#18181b" rounded={12} flex="col" p={24} gap={12}>
-  <Text size={18} weight="bold" color="#fff">Title</Text>
-  <Text size={14} color="#a1a1aa" w="fill">Description text</Text>
-  <Frame bg="#3b82f6" px={16} py={8} rounded={6}>
-    <Text size={14} weight="medium" color="#fff">Button</Text>
-  </Frame>
-</Frame>'
 ```
 
 ---
