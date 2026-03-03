@@ -14,6 +14,7 @@ import { FigJamClient } from './figjam-client.js';
 import { FigmaClient } from './figma-client.js';
 import { isPatched, patchFigma, unpatchFigma, getFigmaCommand, getCdpPort } from './figma-patch.js';
 import { loadRegistry, saveRegistry, resolveComponent, addLocalComponents, addLibraryComponents, addAlias, listComponents } from './lib-registry.js';
+import { loadDSContext, buildDSContext, ensureDSContext, resolveColorValue, getDSSummary, invalidateDSContext } from './ds-context.js';
 
 // Daemon configuration
 const DAEMON_PORT = 3456;
@@ -86,9 +87,10 @@ async function fastEval(code) {
 
 // Fast render via daemon (falls back to figma-use)
 async function fastRender(jsx) {
-  // Load registry for library component support
-  const hasLibInstances = /<Instance\s+[^>]*(lib|key)=/.test(jsx);
-  const registry = hasLibInstances ? loadRegistry() : null;
+  // DS-first: always load registry + DS context
+  const registry = loadRegistry();
+  let dsContext = null;
+  try { dsContext = loadDSContext(); } catch (e) { /* use without */ }
 
   // Try daemon first
   if (isDaemonRunning()) {
@@ -102,12 +104,12 @@ async function fastRender(jsx) {
   // Try direct connection
   try {
     const client = await getFigmaClient();
-    return await client.render(jsx, registry);
+    return await client.render(jsx, registry, dsContext);
   } catch (e) {
     // Fall back to npx figma-use
     const { FigmaClient } = await import('./figma-client.js');
     const tempClient = new FigmaClient();
-    const code = tempClient.parseJSX(jsx, registry);
+    const code = tempClient.parseJSX(jsx, registry, dsContext);
 
     const tempFile = '/tmp/figma-render-' + Date.now() + '.js';
     writeFileSync(tempFile, code);
@@ -1681,6 +1683,16 @@ lib
       const libCount = (result.library || []).length;
       spinner.succeed(`Found ${localCount} local, ${libCount} library components. Registry updated.`);
 
+      // Show diagnostic info
+      if (result._diag) {
+        const d = result._diag;
+        console.log(chalk.dim(`  Scanned ${d.instances} instances on canvas → ${d.discovered} library components` + (d.variants ? ` (${d.variants} variants)` : '')));
+      }
+      if (libCount === 0) {
+        console.log(chalk.yellow('  Tip: Library components are discovered from instances on canvas.'));
+        console.log(chalk.yellow('  Place component instances from your library, then re-scan.'));
+      }
+
       if (localCount > 0) {
         console.log(chalk.cyan('\n  Local components:'));
         for (const c of result.local.slice(0, 20)) {
@@ -1839,6 +1851,118 @@ lib
     if (resolved.page) console.log(chalk.white(`  Page: ${resolved.page}`));
     if (resolved.description) console.log(chalk.white(`  Description: ${resolved.description}`));
     console.log();
+  });
+
+// ============ DESIGN SYSTEM (DS) ============
+
+const ds = program
+  .command('ds')
+  .description('Design system context management');
+
+ds
+  .command('info')
+  .description('Show design system summary (components, variables, libraries)')
+  .action(async () => {
+    await checkConnection();
+    const spinner = ora('Loading design system context...').start();
+    try {
+      const client = await getFigmaClient();
+      const dsContext = await ensureDSContext(client);
+      const registry = loadRegistry();
+      spinner.stop();
+
+      // DS context summary
+      console.log(chalk.cyan('\n' + getDSSummary(dsContext)));
+
+      // Component summary
+      const localCount = Object.keys(registry.local || {}).length;
+      const libCount = Object.keys(registry.library || {}).length;
+      console.log(chalk.cyan(`  Components: ${localCount} local, ${libCount} from library`));
+
+      if (libCount > 0) {
+        const topLib = Object.entries(registry.library || {}).slice(0, 8).map(([n]) => n).join(', ');
+        console.log(chalk.gray(`  Top library: ${topLib}${libCount > 8 ? '...' : ''}`));
+      }
+      if (localCount > 0) {
+        const topLocal = Object.entries(registry.local || {}).slice(0, 8).map(([n]) => n).join(', ');
+        console.log(chalk.gray(`  Top local: ${topLocal}${localCount > 8 ? '...' : ''}`));
+      }
+      console.log();
+    } catch (e) {
+      spinner.fail('Failed to load DS context: ' + e.message);
+    }
+  });
+
+ds
+  .command('refresh')
+  .description('Force rescan of design system (components + variables)')
+  .action(async () => {
+    await checkConnection();
+    const spinner = ora('Scanning design system...').start();
+    try {
+      const client = await getFigmaClient();
+
+      // Rescan components
+      const scanResult = await client.scanAllComponents();
+      const registry = loadRegistry();
+      // Clear existing entries and rebuild
+      registry.local = {};
+      registry.library = {};
+      addLocalComponents(scanResult.local || [], registry);
+      addLibraryComponents(scanResult.library || [], registry);
+      saveRegistry(registry);
+
+      // Rebuild DS context (variables)
+      invalidateDSContext();
+      const dsContext = await buildDSContext(client);
+
+      const localCount = Object.keys(registry.local || {}).length;
+      const libCount = Object.keys(registry.library || {}).length;
+      const varCount = dsContext.variableCount || 0;
+
+      spinner.succeed(`Design system refreshed: ${localCount} local + ${libCount} library components, ${varCount} color variables`);
+    } catch (e) {
+      spinner.fail('Failed to refresh: ' + e.message);
+    }
+  });
+
+ds
+  .command('vars')
+  .description('List all design system color variables by name')
+  .option('--search <pattern>', 'Filter by name pattern')
+  .option('--json', 'Output as JSON')
+  .action(async (options) => {
+    await checkConnection();
+    try {
+      const client = await getFigmaClient();
+      const dsContext = await ensureDSContext(client);
+
+      if (!dsContext?.nameToHex) {
+        console.log(chalk.yellow('No variables found. Run: ds refresh'));
+        return;
+      }
+
+      let entries = Object.entries(dsContext.nameToHex);
+      if (options.search) {
+        const pattern = options.search.toLowerCase();
+        entries = entries.filter(([name]) => name.toLowerCase().includes(pattern));
+      }
+
+      if (options.json) {
+        console.log(JSON.stringify(Object.fromEntries(entries), null, 2));
+        return;
+      }
+
+      console.log(chalk.cyan(`\n  Color Variables (${entries.length}):\n`));
+      for (const [name, hex] of entries) {
+        const info = dsContext.variables?.[name];
+        const coll = info?.collection ? chalk.gray(` [${info.collection}]`) : '';
+        console.log(`    ${chalk.white(name)} → ${chalk.hex(hex)(hex)}${coll}`);
+      }
+      console.log();
+    } catch (e) {
+      console.log(chalk.red('Failed: ' + e.message));
+    }
   });
 
 // ============ TOKENS (PRESETS) ============
@@ -4565,22 +4689,61 @@ program
         posX = getNextFreeX();
       }
 
-      // Always use our FigmaClient for variable auto-binding support
-      const hasLibInstances = /<Instance\s+[^>]*(lib|key)=/.test(jsx);
-      const registry = hasLibInstances ? loadRegistry() : null;
+      // DS-first: always load registry + DS context for component & variable support
+      let registry = loadRegistry();
+      const registryEmpty = !Object.keys(registry.local || {}).length && !Object.keys(registry.library || {}).length;
+
+      // Auto-scan components if registry is empty
+      const client = await getFigmaClient();
+      if (registryEmpty) {
+        try {
+          const scanResult = await client.scanAllComponents();
+          addLocalComponents(scanResult.local || [], registry);
+          addLibraryComponents(scanResult.library || [], registry);
+          saveRegistry(registry);
+          const total = Object.keys(registry.local || {}).length + Object.keys(registry.library || {}).length;
+          if (total > 0) console.log(chalk.gray(`  Auto-discovered ${total} components`));
+        } catch (e) { /* scan failed, continue without */ }
+      }
+
+      // Load DS context for variable name support
+      let dsContext = null;
+      try {
+        dsContext = await ensureDSContext(client);
+      } catch (e) { /* continue without DS context */ }
+
+      // Component suggestion: check if JSX creates frames that match existing components
+      try {
+        const frameNames = jsx.match(/<Frame\s+[^>]*name="([^"]+)"/g)?.map(m => m.match(/name="([^"]+)"/)[1]) || [];
+        for (const name of frameNames) {
+          const match = resolveComponent(name, registry);
+          if (match) {
+            console.log(chalk.yellow(`  Tip: "${name}" exists as a ${match.type} component. Use <Instance lib="${name}" /> to reuse it.`));
+          }
+        }
+      } catch (e) { /* suggestions are non-blocking */ }
 
       // Try daemon first (uses our FigmaClient internally)
       let result;
       if (isDaemonRunning()) {
         try {
           result = await daemonExec('render', { jsx });
-        } catch (e) { /* fall through */ }
+          // Validate daemon result — empty or childless frames indicate a silent failure
+          if (result && result.id) {
+            const childCount = await client.eval(`(async () => { const n = await figma.getNodeByIdAsync('${result.id}'); return n && n.children ? n.children.length : -1; })()`);
+            if (childCount === 0) {
+              console.log(chalk.yellow('  ⚠ Daemon returned empty frame, retrying directly...'));
+              result = null;
+            }
+          }
+        } catch (e) {
+          console.log(chalk.yellow('  ⚠ Daemon render failed (' + e.message + '), falling back to direct...'));
+        }
       }
 
-      // Fallback to direct client
+      // Fallback to direct client with DS context
       if (!result) {
-        const client = await getFigmaClient();
-        result = await client.render(jsx, registry);
+        result = await client.render(jsx, registry, dsContext);
       }
 
       if (result && result.id) {
@@ -4614,29 +4777,32 @@ program
       let currentY = vertical ? getNextFreeY(gap) : 0;
       let results = [];
 
-      // Load registry once if any JSX uses library instances
-      const anyLibInstances = jsxArray.some(j => /<Instance\s+[^>]*(lib|key)=/.test(j));
-      const registry = anyLibInstances ? loadRegistry() : null;
-      let client = anyLibInstances ? await getFigmaClient() : null;
+      // DS-first: always load registry + DS context
+      let registry = loadRegistry();
+      let client = await getFigmaClient();
+
+      // Auto-scan components if registry is empty
+      const registryEmpty = !Object.keys(registry.local || {}).length && !Object.keys(registry.library || {}).length;
+      if (registryEmpty) {
+        try {
+          const scanResult = await client.scanAllComponents();
+          addLocalComponents(scanResult.local || [], registry);
+          addLibraryComponents(scanResult.library || [], registry);
+          saveRegistry(registry);
+        } catch (e) { /* continue without */ }
+      }
+
+      // Load DS context for variable name support
+      let dsContext = null;
+      try {
+        dsContext = await ensureDSContext(client);
+      } catch (e) { /* continue without */ }
 
       for (const jsx of jsxArray) {
         try {
           let result;
-          const hasLibInstances = /<Instance\s+[^>]*(lib|key)=/.test(jsx);
-
-          if (hasLibInstances) {
-            if (!client) client = await getFigmaClient();
-            result = await client.render(jsx, registry);
-          } else {
-            const cmd = `npx figma-use render --stdin --json --x ${currentX} --y ${currentY}`;
-            const output = execSync(cmd, {
-              input: jsx,
-              encoding: 'utf8',
-              stdio: ['pipe', 'pipe', 'pipe'],
-              timeout: 30000
-            });
-            result = JSON.parse(output.trim());
-          }
+          // Always use our FigmaClient with DS context for variable auto-binding
+          result = await client.render(jsx, registry, dsContext);
 
           results.push(result);
           console.log(chalk.green('✓ Rendered: ' + result.id + (result.name ? ' (' + result.name + ')' : '')));

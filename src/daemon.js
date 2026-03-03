@@ -12,6 +12,7 @@ import { createServer } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { FigmaClient } from './figma-client.js';
 import { loadRegistry } from './lib-registry.js';
+import { loadDSContext } from './ds-context.js';
 
 const PORT = parseInt(process.env.DAEMON_PORT) || 3456;
 const MODE = process.env.DAEMON_MODE || 'auto'; // 'auto', 'cdp', 'plugin'
@@ -179,15 +180,41 @@ async function handleRequest(req, res) {
 
   // Execute command
   if (req.url === '/exec' && req.method === 'POST') {
-    let body = '';
-    req.on('data', chunk => body += chunk);
+    const MAX_BODY = 5 * 1024 * 1024; // 5MB limit
+    const chunks = [];
+    let bodySize = 0;
+
+    req.on('data', chunk => {
+      bodySize += chunk.length;
+      if (bodySize <= MAX_BODY) {
+        chunks.push(chunk);
+      }
+    });
     req.on('end', async () => {
+      if (bodySize > MAX_BODY) {
+        res.writeHead(413, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: `Payload too large: ${bodySize} bytes (max ${MAX_BODY})` }));
+        return;
+      }
+
+      const body = Buffer.concat(chunks).toString('utf8');
       const MAX_RETRIES = 2;
       let lastError;
 
+      let parsed;
+      try {
+        parsed = JSON.parse(body);
+      } catch (parseErr) {
+        console.log(`[daemon] JSON parse error: ${parseErr.message} (body length: ${body.length})`);
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: `Invalid JSON payload (${body.length} bytes): ${parseErr.message}` }));
+        return;
+      }
+
+      const { action, code, jsx, jsxArray } = parsed;
+
       for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
         try {
-          const { action, code, jsx, jsxArray } = JSON.parse(body);
           let result;
 
           const execWithTimeout = async (fn) => {
@@ -208,16 +235,18 @@ async function handleRequest(req, res) {
               const parser = new FigmaClient();
               const hasLib = /<Instance\s+[^>]*(lib|key)=/.test(jsx);
               const reg = hasLib ? loadRegistry() : null;
-              const renderCode = parser.parseJSX(jsx, reg);
+              const dsCtx = loadDSContext();
+              const renderCode = parser.parseJSX(jsx, reg, dsCtx);
               result = await execWithTimeout(() => executeEval(renderCode));
               break;
             case 'render-batch':
               const batchParser = new FigmaClient();
               const anyLib = (jsxArray || []).some(j => /<Instance\s+[^>]*(lib|key)=/.test(j));
               const batchReg = anyLib ? loadRegistry() : null;
+              const batchDsCtx = loadDSContext();
               result = [];
               for (const j of jsxArray) {
-                const batchCode = batchParser.parseJSX(j, batchReg);
+                const batchCode = batchParser.parseJSX(j, batchReg, batchDsCtx);
                 result.push(await execWithTimeout(() => executeEval(batchCode)));
               }
               break;

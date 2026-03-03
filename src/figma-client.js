@@ -273,9 +273,9 @@ export class FigmaClient {
   /**
    * Render JSX-like syntax to Figma
    */
-  async render(jsx, registry = null) {
+  async render(jsx, registry = null, dsContext = null) {
     // Parse JSX and generate Figma code, with rollback on failure
-    const code = this.parseJSX(jsx, registry);
+    const code = this.parseJSX(jsx, registry, dsContext).trim();
     const safeCode = `(async function() {
       const __before = new Set(figma.currentPage.children.map(n => n.id));
       try {
@@ -291,7 +291,10 @@ export class FigmaClient {
   /**
    * Parse JSX-like syntax to Figma Plugin API code
    */
-  parseJSX(jsx, registry = null) {
+  parseJSX(jsx, registry = null, dsContext = null) {
+    // Store dsContext on instance for use by code generation methods
+    this._dsContext = dsContext;
+
     // Find opening Frame tag
     const openMatch = jsx.match(/<Frame\s+([^>]*)>/);
     if (!openMatch) {
@@ -392,8 +395,15 @@ export class FigmaClient {
         }
         i += closeTag.length;
       } else if (remaining.startsWith(`<${tagName} `) || remaining.startsWith(`<${tagName}>`)) {
-        depth++;
-        i++;
+        // Check if this is a self-closing tag (e.g. <Frame ... />)
+        const tagEnd = remaining.indexOf('>');
+        if (tagEnd > 0 && remaining[tagEnd - 1] === '/') {
+          // Self-closing tag — don't change depth
+          i += tagEnd + 1;
+        } else {
+          depth++;
+          i++;
+        }
       } else {
         i++;
       }
@@ -427,26 +437,38 @@ export class FigmaClient {
     let match;
 
     while ((match = frameOpenRegex.exec(childrenStr)) !== null) {
-      const frameProps = this.parseProps(match[1]);
+      const rawProps = match[1];
+      const isSelfClosing = rawProps.trimEnd().endsWith('/');
+      const propsStr = isSelfClosing ? rawProps.trimEnd().slice(0, -1) : rawProps;
+      const frameProps = this.parseProps(propsStr);
       frameProps._type = 'frame';
       frameProps._index = match.index;
 
-      // Get content between opening and matching closing tag
-      const afterOpen = childrenStr.slice(match.index + match[0].length);
-      const innerContent = this.extractContent(afterOpen, 'Frame');
+      if (isSelfClosing) {
+        // Self-closing <Frame ... /> — no children
+        frameProps._children = [];
+        children.push(frameProps);
+        const fullLength = match[0].length;
+        frameRanges.push({ start: match.index, end: match.index + fullLength });
+        frameOpenRegex.lastIndex = match.index + fullLength;
+      } else {
+        // Get content between opening and matching closing tag
+        const afterOpen = childrenStr.slice(match.index + match[0].length);
+        const innerContent = this.extractContent(afterOpen, 'Frame');
 
-      // Calculate full frame length
-      const fullLength = match[0].length + innerContent.length + '</Frame>'.length;
+        // Calculate full frame length
+        const fullLength = match[0].length + innerContent.length + '</Frame>'.length;
 
-      // Recursively parse children of nested frame
-      frameProps._children = this.parseChildren(innerContent);
-      children.push(frameProps);
+        // Recursively parse children of nested frame
+        frameProps._children = this.parseChildren(innerContent);
+        children.push(frameProps);
 
-      // Mark this range as consumed
-      frameRanges.push({ start: match.index, end: match.index + fullLength });
+        // Mark this range as consumed
+        frameRanges.push({ start: match.index, end: match.index + fullLength });
 
-      // Move regex past this frame to avoid re-matching nested frames
-      frameOpenRegex.lastIndex = match.index + fullLength;
+        // Move regex past this frame to avoid re-matching nested frames
+        frameOpenRegex.lastIndex = match.index + fullLength;
+      }
     }
 
     // Parse Text elements, but skip those inside nested Frames
@@ -524,8 +546,11 @@ export class FigmaClient {
 
   generateCode(props, children) {
     const name = props.name || 'Frame';
-    const width = props.w || props.width || 320;
-    const height = props.h || props.height || 200;
+    const rawW = props.w || props.width || 320;
+    const rawH = props.h || props.height || 200;
+    // w="fill" / h="fill" on root frame: treat as default size (fill only works inside auto-layout parents)
+    const width = rawW === 'fill' ? 320 : rawW;
+    const height = rawH === 'fill' ? 200 : rawH;
     const bg = props.bg || props.fill || '#ffffff';
     const stroke = props.stroke || null;
     const rounded = props.rounded || props.radius || 0;
@@ -534,7 +559,7 @@ export class FigmaClient {
     const p = props.p || props.padding || 0;
     const px = props.px || p;
     const py = props.py || p;
-    const align = props.align || 'MIN';
+    const align = props.items || props.align || 'MIN';
     const justify = props.justify || 'MIN';
     const useSmartPos = props.x === undefined;
     const explicitX = props.x || 0;
@@ -576,12 +601,14 @@ export class FigmaClient {
           const size = item.size || 14;
           const color = item.color || '#000000';
           const fillWidth = item.w === 'fill';
+          const textGrow = item.grow !== undefined ? parseInt(item.grow) : 0;
 
           return `
         const el${idx} = figma.createText();
         ${this._generateTextCode(`el${idx}`, size, style, color, JSON.stringify(item.content))}
         ${parentVar}.appendChild(el${idx});
-        ${fillWidth ? `el${idx}.layoutSizingHorizontal = 'FILL'; el${idx}.textAutoResize = 'HEIGHT';` : ''}`;
+        ${fillWidth ? `el${idx}.layoutSizingHorizontal = 'FILL'; el${idx}.textAutoResize = 'HEIGHT';` : ''}
+        ${textGrow ? `el${idx}.layoutGrow = ${textGrow};` : ''}`;
         } else if (item._type === 'frame') {
           // Nested frame (button, etc.)
           const fName = item.name || 'Nested Frame';
@@ -594,8 +621,9 @@ export class FigmaClient {
           const fP = item.p !== undefined ? item.p : (item.padding !== undefined ? item.padding : null);
           const fPx = item.px !== undefined ? item.px : (fP !== null ? fP : 16);
           const fPy = item.py !== undefined ? item.py : (fP !== null ? fP : 10);
-          const fAlign = item.align || 'center';
+          const fAlign = item.items || item.align || 'center';
           const fJustify = item.justify || 'center';
+          const fGrow = item.grow !== undefined ? parseInt(item.grow) : 0;
           // Clip defaults to false for nested frames
           const fClip = item.clip === 'true' || item.clip === true;
 
@@ -622,9 +650,7 @@ export class FigmaClient {
         el${idx}.layoutMode = '${fFlex === 'row' ? 'HORIZONTAL' : 'VERTICAL'}';
         el${idx}.primaryAxisSizingMode = '${hasWidth && !fillWidth ? 'FIXED' : 'AUTO'}';
         el${idx}.counterAxisSizingMode = '${hasHeight && !fillHeight ? 'FIXED' : 'AUTO'}';
-        ${hasWidth && !fillWidth || hasHeight && !fillHeight ? `el${idx}.resize(${hasWidth ? fWidth : 100}, ${hasHeight ? fHeight : 40});` : ''}
-        ${fillWidth ? `el${idx}.layoutSizingHorizontal = 'FILL';` : ''}
-        ${fillHeight ? `el${idx}.layoutSizingVertical = 'FILL';` : ''}
+        ${hasWidth && !fillWidth || hasHeight && !fillHeight ? `el${idx}.resize(${hasWidth && !fillWidth ? fWidth : 100}, ${hasHeight && !fillHeight ? fHeight : 40});` : ''}
         el${idx}.itemSpacing = ${fGap};
         el${idx}.paddingTop = ${fPy};
         el${idx}.paddingBottom = ${fPy};
@@ -637,6 +663,9 @@ export class FigmaClient {
         el${idx}.counterAxisAlignItems = '${fAlignVal}';
         el${idx}.clipsContent = ${fClip};
         ${parentVar}.appendChild(el${idx});
+        ${fillWidth ? `el${idx}.layoutSizingHorizontal = 'FILL';` : ''}
+        ${fillHeight ? `el${idx}.layoutSizingVertical = 'FILL';` : ''}
+        ${fGrow ? `el${idx}.layoutGrow = ${fGrow};` : ''}
         ${nestedChildren}`;
         } else if (item._type === 'rect') {
           // Rectangle element
@@ -872,10 +901,13 @@ export class FigmaClient {
           } catch(e) {}
         }
 
+        // Name→Variable map for direct name-based binding
+        const __colorNameMap = new Map();
+
         // 1) Index local variables
         try {
           const __localVars = figma.variables.getLocalVariables('COLOR');
-          for (const v of __localVars) __indexVar(v);
+          for (const v of __localVars) { __indexVar(v); __colorNameMap.set(v.name, v); }
         } catch(e) {}
 
         // 2) Index linked library variables (parallel imports)
@@ -891,7 +923,7 @@ export class FigmaClient {
             } catch(e) {}
           }
           const __imported = await Promise.all(__colorKeys.map(k => figma.variables.importVariableByKeyAsync(k).catch(() => null)));
-          for (const v of __imported) { if (v) __indexVar(v); }
+          for (const v of __imported) { if (v) { __indexVar(v); __colorNameMap.set(v.name, v); } }
         } catch(e) {}
 
         // 3) Index text styles (local + library, parallel imports)
@@ -932,6 +964,26 @@ export class FigmaClient {
             } catch(e) { node.strokes = [paint]; }
           } else { node.strokes = [paint]; }
         }
+        function __applyFillByName(node, varName) {
+          const v = __colorNameMap.get(varName);
+          if (!v) return false;
+          try {
+            const paint = {type:'SOLID',color:{r:0,g:0,b:0}};
+            const bound = figma.variables.setBoundVariableForPaint(paint, 'color', v);
+            node.fills = [bound];
+            return true;
+          } catch(e) { return false; }
+        }
+        function __applyStrokeByName(node, varName) {
+          const v = __colorNameMap.get(varName);
+          if (!v) return false;
+          try {
+            const paint = {type:'SOLID',color:{r:0,g:0,b:0}};
+            const bound = figma.variables.setBoundVariableForPaint(paint, 'color', v);
+            node.strokes = [bound];
+            return true;
+          } catch(e) { return false; }
+        }
         function __findTextStyle(fontSize, fontStyle) {
           let match = __tsArr.find(s => s.fontSize === fontSize && s.fontStyle === fontStyle);
           if (!match) match = __tsArr.find(s => s.fontSize === fontSize);
@@ -940,27 +992,128 @@ export class FigmaClient {
     `;
   }
 
-  _generateFillCode(nodeVar, hex) {
-    const h = this._normalizeHex(hex);
+  /**
+   * Check if a color value is a variable name (not hex).
+   * Variable names contain "/" or are alphanumeric words without "#".
+   */
+  _isVariableName(value) {
+    if (!value || typeof value !== 'string') return false;
+    if (value.startsWith('#')) return false;
+    // Looks like hex without # (3 or 6 hex chars) — treat as hex, not variable name
+    if (/^[0-9a-fA-F]{3}$/.test(value) || /^[0-9a-fA-F]{6}$/.test(value)) return false;
+    // Contains "/" like "blue/500" or "primitives/blue/500"
+    if (value.includes('/')) return true;
+    // Pure words like "primary", "background", "destructive"
+    if (/^[a-zA-Z][a-zA-Z0-9-]*$/.test(value)) return true;
+    return false;
+  }
+
+  /**
+   * Resolve a color value to either a hex-based fill call or a name-based fill call.
+   * Supports: "#3b82f6", "blue/500", "primary", "zinc/900"
+   */
+  _resolveColorForCodegen(value) {
+    if (!value) return { type: 'hex', hex: '#000000' };
+
+    // If it's a variable name, try to resolve via dsContext
+    if (this._isVariableName(value)) {
+      // First check dsContext for hex mapping (for fallback)
+      if (this._dsContext?.nameToHex?.[value]) {
+        return { type: 'varName', varName: value, hex: this._dsContext.nameToHex[value] };
+      }
+      // Case-insensitive match
+      if (this._dsContext?.nameToHex) {
+        const lower = value.toLowerCase();
+        for (const [name, hex] of Object.entries(this._dsContext.nameToHex)) {
+          if (name.toLowerCase() === lower) {
+            return { type: 'varName', varName: name, hex };
+          }
+        }
+        // Partial suffix match (e.g., "blue/500" matches "primitives/blue/500")
+        for (const [name, hex] of Object.entries(this._dsContext.nameToHex)) {
+          if (name.toLowerCase().endsWith('/' + lower)) {
+            return { type: 'varName', varName: name, hex };
+          }
+        }
+      }
+      // No dsContext available — emit name-based binding anyway (runtime will resolve)
+      return { type: 'varName', varName: value, hex: null };
+    }
+
+    // It's a hex value
+    return { type: 'hex', hex: this._normalizeHex(value) };
+  }
+
+  _generateFillCode(nodeVar, colorValue) {
+    const resolved = this._resolveColorForCodegen(colorValue);
+
+    if (resolved.type === 'varName') {
+      const escapedName = resolved.varName.replace(/'/g, "\\'");
+      if (resolved.hex) {
+        // Have hex fallback: try name first, fall back to RGB
+        const h = this._normalizeHex(resolved.hex);
+        const r = parseInt(h.slice(1,3), 16);
+        const g = parseInt(h.slice(3,5), 16);
+        const b = parseInt(h.slice(5,7), 16);
+        return `if (!__applyFillByName(${nodeVar}, '${escapedName}')) { __applyFill(${nodeVar}, ${r}, ${g}, ${b}); }`;
+      }
+      // No hex fallback: name-only binding
+      return `__applyFillByName(${nodeVar}, '${escapedName}');`;
+    }
+
+    // Standard hex path
+    const h = resolved.hex;
     const r = parseInt(h.slice(1,3), 16);
     const g = parseInt(h.slice(3,5), 16);
     const b = parseInt(h.slice(5,7), 16);
     return `__applyFill(${nodeVar}, ${r}, ${g}, ${b});`;
   }
 
-  _generateStrokeCode(nodeVar, hex) {
-    const h = this._normalizeHex(hex);
+  _generateStrokeCode(nodeVar, colorValue) {
+    const resolved = this._resolveColorForCodegen(colorValue);
+
+    if (resolved.type === 'varName') {
+      const escapedName = resolved.varName.replace(/'/g, "\\'");
+      if (resolved.hex) {
+        const h = this._normalizeHex(resolved.hex);
+        const r = parseInt(h.slice(1,3), 16);
+        const g = parseInt(h.slice(3,5), 16);
+        const b = parseInt(h.slice(5,7), 16);
+        return `if (!__applyStrokeByName(${nodeVar}, '${escapedName}')) { __applyStroke(${nodeVar}, ${r}, ${g}, ${b}); } ${nodeVar}.strokeWeight = 1;`;
+      }
+      return `__applyStrokeByName(${nodeVar}, '${escapedName}'); ${nodeVar}.strokeWeight = 1;`;
+    }
+
+    const h = resolved.hex;
     const r = parseInt(h.slice(1,3), 16);
     const g = parseInt(h.slice(3,5), 16);
     const b = parseInt(h.slice(5,7), 16);
     return `__applyStroke(${nodeVar}, ${r}, ${g}, ${b}); ${nodeVar}.strokeWeight = 1;`;
   }
 
-  _generateTextCode(nodeVar, fontSize, fontStyle, colorHex, contentStr) {
-    const h = this._normalizeHex(colorHex);
-    const r = parseInt(h.slice(1,3), 16);
-    const g = parseInt(h.slice(3,5), 16);
-    const b = parseInt(h.slice(5,7), 16);
+  _generateTextCode(nodeVar, fontSize, fontStyle, colorValue, contentStr) {
+    const resolved = this._resolveColorForCodegen(colorValue);
+    let fillCode;
+
+    if (resolved.type === 'varName') {
+      const escapedName = resolved.varName.replace(/'/g, "\\'");
+      if (resolved.hex) {
+        const h = this._normalizeHex(resolved.hex);
+        const r = parseInt(h.slice(1,3), 16);
+        const g = parseInt(h.slice(3,5), 16);
+        const b = parseInt(h.slice(5,7), 16);
+        fillCode = `if (!__applyFillByName(${nodeVar}, '${escapedName}')) { __applyFill(${nodeVar}, ${r}, ${g}, ${b}); }`;
+      } else {
+        fillCode = `__applyFillByName(${nodeVar}, '${escapedName}');`;
+      }
+    } else {
+      const h = resolved.hex;
+      const r = parseInt(h.slice(1,3), 16);
+      const g = parseInt(h.slice(3,5), 16);
+      const b = parseInt(h.slice(5,7), 16);
+      fillCode = `__applyFill(${nodeVar}, ${r}, ${g}, ${b});`;
+    }
+
     return `{
           const _ts = __findTextStyle(${fontSize}, '${fontStyle}');
           if (_ts) {
@@ -973,7 +1126,7 @@ export class FigmaClient {
             ${nodeVar}.fontSize = ${fontSize};
             ${nodeVar}.characters = ${contentStr};
           }
-          __applyFill(${nodeVar}, ${r}, ${g}, ${b});
+          ${fillCode}
         }`;
   }
 
@@ -1894,23 +2047,44 @@ export class FigmaClient {
 
         const library = [];
         const seen = new Set();
+
+        // Discover library components from instances already on canvas
+        // This is the only reliable method — Figma Plugin API has no "list all library components" endpoint
         const instances = figma.root.findAll(n => n.type === 'INSTANCE');
+        let variantCount = 0;
         for (const instance of instances) {
           try {
             const main = await instance.getMainComponentAsync();
             if (main && main.remote && !seen.has(main.key)) {
               seen.add(main.key);
+              const setName = main.parent?.type === 'COMPONENT_SET' ? main.parent.name : null;
               library.push({
                 key: main.key,
                 name: main.name,
                 description: main.description || '',
-                libraryName: main.parent?.type === 'COMPONENT_SET' ? main.parent.name : null
+                libraryName: setName
               });
+
+              // Also enumerate sibling variants from the same component set
+              if (main.parent?.type === 'COMPONENT_SET') {
+                for (const sibling of main.parent.children) {
+                  if (sibling.type === 'COMPONENT' && sibling.remote && !seen.has(sibling.key)) {
+                    seen.add(sibling.key);
+                    variantCount++;
+                    library.push({
+                      key: sibling.key,
+                      name: sibling.name,
+                      description: sibling.description || '',
+                      libraryName: setName
+                    });
+                  }
+                }
+              }
             }
           } catch {}
         }
 
-        return { local, library };
+        return { local, library, _diag: { instances: instances.length, discovered: library.length, variants: variantCount } };
       })()
     `);
   }

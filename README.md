@@ -25,6 +25,9 @@
 
 A CLI that connects directly to Figma Desktop and gives you complete control:
 
+- **Design System First** — Automatically discovers and uses components + variables from linked libraries. Never hardcodes colors — always uses your existing design tokens
+- **Full Library Discovery** — Scans every component and variable from linked team libraries, even those not yet placed on canvas
+- **Variable Names in JSX** — Use `bg="primary"` or `bg="blue/500"` directly in render commands, resolved from your file's actual design system
 - **Design Tokens** — Create variables, collections, modes (Light/Dark), bind to nodes
 - **Create Anything** — Frames, text, shapes, icons (150k+ from Iconify), components
 - **Team Libraries** — Import and use components, styles, variables from any library
@@ -94,13 +97,17 @@ Done! Now just talk to your AI about your designs.
 
 Once connected, just ask your AI in plain language:
 
-> "Add shadcn colors to my project"
+> "What design system does this file have?"
 
-> "Add a card component"
+> "Create a card using the existing DS colors"
+
+> "Place a Button from the library"
 
 > "Check accessibility"
 
 > "Export variables as CSS"
+
+The CLI is **design-system-first**: on first use, it automatically discovers all components and variables from your file's linked libraries. Your AI learns what's available and uses those — never hardcoded hex colors.
 
 You never need to learn or type CLI commands yourself. The included instruction file teaches your AI every command, so it translates your natural language into the right calls behind the scenes.
 
@@ -247,6 +254,24 @@ Run Command Prompt or PowerShell as Administrator, then run `node src/index.js c
 
 ## Full Feature List
 
+### Design System First (DS-First)
+
+The CLI automatically discovers and prioritizes your file's existing design system before creating anything. No hardcoded values — everything references real variables and components.
+
+- **Auto-discovery** — On first render, automatically scans for all components and variables
+- **Full library catalog** — Discovers ALL components from linked team libraries, even those not yet placed on canvas
+- **Variable names in JSX** — Use `bg="<var-name>"` instead of hex colors in render commands
+- **DS context caching** — Variable/component data cached for 5 minutes, refreshable on demand
+- **Component suggestions** — Warns when you create a frame that matches an existing component name
+- **Smart fallback** — Hex colors still work and auto-bind to matching variables if RGB values match
+
+```bash
+node src/index.js ds info                    # Show libraries, variable count, component count
+node src/index.js ds vars                    # List ALL color variable names with hex values
+node src/index.js ds vars --search "gray"    # Filter variables by name
+node src/index.js ds refresh                 # Force rescan of components + variables
+```
+
 ### Design Tokens & Variables
 
 - **Color presets** — shadcn (244 primitives + 32 semantic with Light/Dark mode), Radix UI (156 vars)
@@ -342,13 +367,15 @@ See [docs/FIGJAM.md](docs/FIGJAM.md) for the full FigJam command reference.
 
 Components resolve in priority order: team library → local → alias → fuzzy match. Existing design system components are always preferred over creating new ones.
 
-- **Scan components** — discover local + library components (`lib scan`)
+- **Full library discovery** — scans ALL components from linked team libraries, not just those on canvas
+- **Auto-scan on first render** — registry populates automatically, no manual `lib scan` needed
 - **Component registry** — persistent storage at `~/.figma-ds-cli/components.json`
 - **Place by name** — `lib place "Button"` with smart auto-positioning
 - **Property overrides** — `lib place "Input" --props '{"text": "Email"}'`
 - **Aliases** — create shortcuts (`lib alias "btn" "Button / Primary"`)
 - **Component info** — view metadata, key, library name (`lib info "Button"`)
 - **JSX integration** — `<Instance lib="Button" />` in render commands
+- **Component suggestions** — warns if you create `<Frame name="Button">` when a Button already exists in the library
 
 ### Designer Utilities
 

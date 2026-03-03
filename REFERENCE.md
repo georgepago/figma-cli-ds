@@ -2,6 +2,20 @@
 
 Full command reference for the Figma CLI. For quick start, see CLAUDE.md (the AI instruction file).
 
+## Design System (DS-First)
+
+Discover and use the file's existing design system before creating anything.
+
+```bash
+node src/index.js ds info                    # Show DS summary (libraries, components, variables)
+node src/index.js ds vars                    # List ALL color variable names with hex values
+node src/index.js ds vars --search "gray"    # Filter variables by name
+node src/index.js ds vars --json             # Output as JSON
+node src/index.js ds refresh                 # Force rescan of components + variables
+```
+
+**Workflow:** Always run `ds vars` and `lib list` before creating anything to discover what variable names and components exist in the file's design system.
+
 ## Design Tokens & Variables
 
 ### Create Design Systems
@@ -50,7 +64,16 @@ node src/index.js create component "Button"
 
 ### Render with JSX
 
+Colors can be variable names (discovered via `ds vars`) or hex values:
+
 ```bash
+# Using DS variable names (preferred — discover with: ds vars)
+node src/index.js render '<Frame name="Card" w={320} h={180} bg="<bg-var-name>" rounded={16} flex="col" gap={8} p={24}>
+  <Text size={20} weight="bold" color="<heading-var-name>">Title</Text>
+  <Text size={14} color="<muted-var-name>" w="fill">Description</Text>
+</Frame>'
+
+# Hex fallback (auto-binds to matching variable if one exists)
 node src/index.js render '<Frame name="Card" w={320} h={180} bg="#fff" rounded={16} flex="col" gap={8} p={24}>
   <Text size={20} weight="bold" color="#111">Title</Text>
   <Text size={14} color="#666" w="fill">Description</Text>
@@ -219,7 +242,7 @@ node src/index.js run /tmp/script.js
 
 **Padding:** `p={24}`, `px={16} py={8}`, `pt={8} pr={16} pb={8} pl={16}`
 
-**Appearance:** `bg="#fff"`, `stroke="#000"`, `strokeWidth={1}`, `opacity={0.5}`
+**Appearance:** `bg="<var-name>"` (preferred), `bg="#fff"` (hex fallback), `stroke="<var-name>"`, `strokeWidth={1}`, `opacity={0.5}`
 
 **Corners:** `rounded={16}`, `roundedTL={8}`, `overflow="hidden"`
 
@@ -233,6 +256,7 @@ layout="horizontal"  →  flex="row"
 padding={24}         →  p={24}
 fill="#fff"          →  bg="#fff"
 cornerRadius={12}    →  rounded={12}
+bg="#hardcoded"      →  bg="<name-from-ds-vars>"   (discover first!)
 ```
 
 ## Advanced Examples
