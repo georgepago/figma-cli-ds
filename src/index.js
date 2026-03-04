@@ -4839,11 +4839,44 @@ const exp = program
 
 exp
   .command('screenshot')
-  .description('Take a screenshot')
+  .description('Take a screenshot of a node or selection')
   .option('-o, --output <file>', 'Output file', 'screenshot.png')
-  .action((options) => {
+  .option('-n, --node <id>', 'Node ID to export (default: selection or current page)')
+  .option('-s, --scale <number>', 'Export scale (1-4)', '2')
+  .action(async (options) => {
     checkConnection();
-    figmaUse(`export screenshot --output "${options.output}"`);
+    const spinner = ora('Exporting screenshot...').start();
+    try {
+      const scale = parseInt(options.scale) || 2;
+      const nodeSelector = options.node
+        ? `figma.getNodeById(${JSON.stringify(options.node)})`
+        : `(figma.currentPage.selection[0] || figma.currentPage)`;
+
+      const code = `(async function() {
+        const node = ${nodeSelector};
+        if (!node) return { error: 'Node not found' };
+        const bytes = await node.exportAsync({ format: 'PNG', constraint: { type: 'SCALE', value: ${scale} } });
+        let binary = '';
+        for (let i = 0; i < bytes.length; i++) {
+          binary += String.fromCharCode(bytes[i]);
+        }
+        return { base64: btoa(binary), name: node.name, width: Math.round(node.width * ${scale}), height: Math.round(node.height * ${scale}) };
+      })()`;
+
+      const result = await fastEval(code);
+
+      if (result.error) {
+        spinner.fail(result.error);
+        return;
+      }
+
+      const buffer = Buffer.from(result.base64, 'base64');
+      writeFileSync(options.output, buffer);
+      spinner.succeed(`Screenshot saved: ${options.output} (${result.width}×${result.height}, ${(buffer.length / 1024).toFixed(0)} KB)`);
+      console.log(chalk.gray(`  Node: "${result.name}"`));
+    } catch (e) {
+      spinner.fail('Screenshot failed: ' + e.message);
+    }
   });
 
 exp
